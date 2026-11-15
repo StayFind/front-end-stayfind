@@ -21,7 +21,18 @@ const ex = {
     users: [], usersById: new Map(), userSearch: '', userRole: '', userStatus: '', userPage: 1,
     listings: [], listingsById: new Map(), listingSearch: '', listingCat: '', listingPage: 1,
     requests: new Map(),
+    reports: [],
     adminsById: new Map()
+};
+
+// Same labels the users see in the "Report this listing" dialog.
+const REPORT_LABELS = {
+    fake: 'Fake or misleading listing',
+    wrong_info: 'Wrong price or details',
+    scam: 'Suspected scam',
+    inappropriate: 'Inappropriate content',
+    unavailable: 'Already rented / no longer available',
+    other: 'Something else'
 };
 
 // Small success popups become toasts instead of blocking dialogs.
@@ -41,7 +52,7 @@ async function adminGet(path) {
     return res.json();
 }
 
-// POST helper for hide / unhide / suspend / unsuspend / dismiss appeal.
+// POST helper for hide / unhide / suspend / unsuspend / dismiss appeal / dismiss reports.
 // Returns null if the session ended, otherwise { ok, data }.
 async function adminPost(path, body) {
     const res = await fetch(`${API_BASE}${path}`, {
@@ -127,6 +138,7 @@ function describeAction(method, rawPath, label) {
     const p = String(rawPath || '').replace(/^\/api\/admin/, '');
     let m;
     const who = (id, word) => label || `${word} #${id}`;
+    if ((m = p.match(/^\/listings\/(\d+)\/dismiss-reports/))) return `Dismissed the user reports on listing ${who(m[1], 'listing')}`;
     if ((m = p.match(/^\/listings\/(\d+)\/dismiss-appeal/))) return `Declined the appeal for listing ${who(m[1], 'listing')}`;
     if ((m = p.match(/^\/listings\/(\d+)\/unhide/))) return `Unhid listing ${who(m[1], 'listing')}`;
     if ((m = p.match(/^\/listings\/(\d+)\/hide/))) return `Hid listing ${who(m[1], 'listing')}`;
@@ -241,6 +253,7 @@ async function askModerationReason({ title, subjectLine, icon, templates, confir
                             <option value="listing_hide">Hid listing</option>
                             <option value="listing_unhide">Unhid listing</option>
                             <option value="appeal_dismiss">Declined appeal</option>
+                            <option value="reports_dismiss">Dismissed reports</option>
                             <option value="review_delete">Deleted review</option>
                             <option value="admin_create">Created admin</option>
                             <option value="admin_edit">Edited admin</option>
@@ -285,6 +298,26 @@ async function askModerationReason({ title, subjectLine, icon, templates, confir
         $('actTo').onchange = (e) => { act.to = e.target.value; if (datesAreValid()) loadActivity(); };
         $('actClear').onclick = () => { clearActivityFilters(); loadActivity(); };
         $('activityMoreBtn').onclick = () => fetchActivity(true);
+    }
+
+    // --- NEW: Reports: sidebar link (with a badge) + panel ---
+    if (settingsLink && settingsPanel && !$('panel-reports')) {
+        settingsLink.insertAdjacentHTML('beforebegin',
+            '<a data-panel="reports"><i class="fas fa-flag"></i> <span>Reports</span><span id="repBadge" class="badge" style="display:none;">0</span></a>');
+        settingsPanel.insertAdjacentHTML('beforebegin', `
+            <div class="panel" id="panel-reports">
+                <h1>Reports</h1>
+                <div class="subtitle">Listings that users reported. Hide a listing if a report is valid, or dismiss the reports if nothing is wrong. Reporters are notified of the outcome.</div>
+                <div class="table-wrap">
+                    <div class="table-scroll">
+                        <table>
+                            <thead><tr><th>Listing</th><th>Landlord</th><th>Reports</th><th>Actions</th></tr></thead>
+                            <tbody id="reportsTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>`);
+        document.querySelector('.sidebar nav a[data-panel="reports"]').addEventListener('click', () => loadReports());
     }
 
     // --- Overview: container for charts under the stat cards ---
@@ -342,6 +375,14 @@ async function askModerationReason({ title, subjectLine, icon, templates, confir
         if (btn.dataset.act === 'hide-listing') hideListing(id);
         if (btn.dataset.act === 'unhide-listing') unhideListing(id);
         if (btn.dataset.act === 'dismiss-appeal') dismissAppeal(id);
+    });
+    // NEW: Reports panel buttons
+    $('reportsTableBody').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-act]');
+        if (!btn) return;
+        const id = Number(btn.dataset.id);
+        if (btn.dataset.act === 'hide-reported') hideListing(id);
+        if (btn.dataset.act === 'dismiss-reports') dismissReports(id);
     });
     $('requestsTableBody').addEventListener('click', (e) => {
         const btn = e.target.closest('[data-act]');
@@ -448,12 +489,16 @@ function renderOverviewExtras(stats, ov, log) {
 
     const pending = Number(stats.pendingRequests) || 0;
     const appeals = Number(stats.pendingAppeals) || 0;
+    const reports = Number(stats.openReports) || 0;
     const banner = (pending > 0
         ? `<div class="alert-banner"><i class="fas fa-bell"></i> ${pending} landlord request${pending === 1 ? '' : 's'} waiting for review
                <button type="button" class="btn-primary-small" data-goto="requests">Review now</button></div>`
         : '') + (appeals > 0
         ? `<div class="alert-banner"><i class="fas fa-flag"></i> ${appeals} hidden listing${appeals === 1 ? ' has' : 's have'} a landlord appeal waiting
                <button type="button" class="btn-primary-small" data-goto="listings">Review now</button></div>`
+        : '') + (reports > 0
+        ? `<div class="alert-banner"><i class="fas fa-triangle-exclamation"></i> ${reports} listing${reports === 1 ? ' was' : 's were'} reported by users
+               <button type="button" class="btn-primary-small" data-goto="reports">Review now</button></div>`
         : '');
 
     let cards = '';
@@ -831,6 +876,7 @@ function exportListingsCsv() {
 }
 
 // Hide / unhide a listing (replaces deleting and editing it).
+// Hiding also closes the open user reports of that listing (done by the server).
 async function hideListing(id) {
     const l = ex.listingsById.get(Number(id));
     const reason = await askModerationReason({
@@ -845,7 +891,7 @@ async function hideListing(id) {
             'Reported by users and under review.'
         ],
         confirmText: 'Hide listing',
-        note: 'It disappears from the public feed and search right away. The landlord can still see it, together with this reason, and can appeal. You can unhide it any time.'
+        note: 'It disappears from the public feed and search right away. The landlord can still see it, together with this reason, and can appeal. Any open user reports on it are marked resolved. You can unhide it any time.'
     });
     if (!reason) return;
 
@@ -855,6 +901,8 @@ async function hideListing(id) {
         if (r.ok) {
             Swal.fire('Hidden', 'The listing is hidden from the public. The landlord can see your reason.', 'success');
             fetchListings();
+            loadReports();
+            loadStats();
         } else {
             Swal.fire('Error', r.data.message || 'Failed to hide listing.', 'error');
         }
@@ -915,6 +963,94 @@ async function dismissAppeal(id) {
             loadStats();
         } else {
             Swal.fire('Error', r.data.message || 'Failed to decline the appeal.', 'error');
+        }
+    } catch (err) {
+        Swal.fire('Error', 'Server connection failed.', 'error');
+    }
+}
+
+// ===================== 4b. NEW: REPORTS =====================
+// Open user reports, grouped per listing. Hide listing = the report is valid
+// (the server also closes the reports). Dismiss reports = nothing is wrong.
+async function loadReports() {
+    const tbody = $('reportsTableBody');
+    if (!tbody) return;
+    try {
+        const rows = await adminGet('/reports');
+        if (!rows) return;
+        ex.reports = rows;
+        renderReports();
+    } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state">Failed to load reports.</div></td></tr>`;
+    }
+}
+
+function renderReports() {
+    const tbody = $('reportsTableBody');
+    if (!tbody) return;
+
+    const groups = new Map();
+    ex.reports.forEach(r => {
+        const key = Number(r.listing_id);
+        if (!groups.has(key)) groups.set(key, { first: r, items: [] });
+        groups.get(key).items.push(r);
+    });
+    const list = [...groups.values()].sort((a, b) => b.items.length - a.items.length);
+
+    const badge = $('repBadge');
+    if (badge) {
+        if (list.length > 0) { badge.style.display = 'inline-block'; badge.innerText = list.length; }
+        else { badge.style.display = 'none'; }
+    }
+
+    if (list.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state"><i class="fas fa-check-circle" style="font-size:24px;"></i><p>No open reports. 🎉</p></div></td></tr>`;
+        return;
+    }
+
+    tbody.innerHTML = list.map(g => {
+        const l = g.first;
+        const id = Number(l.listing_id);
+        const hidden = Number(l.is_hidden) === 1;
+        const details = g.items.map(r => `
+            <div style="font-size:12px; margin-top:7px; line-height:1.45;">
+                <strong>${esc(REPORT_LABELS[r.reason] || r.reason)}</strong>
+                — ${esc(r.reporter_name || 'User')} · ${esc(fmtDate(r.created_at))}
+                ${r.details ? `<div style="color:#5b6b82;">“${esc(r.details)}”</div>` : ''}
+            </div>`).join('');
+        return `
+        <tr>
+            <td data-label="Listing"><strong>${esc(l.title)}</strong>${hidden ? ' <span class="pill rejected">Hidden</span>' : ''}</td>
+            <td data-label="Landlord">${esc(l.landlord_name || '—')}</td>
+            <td data-label="Reports"><span class="pill pending">${g.items.length} report${g.items.length === 1 ? '' : 's'}</span>${details}</td>
+            <td data-label="Actions">
+                ${hidden ? '' : `<button class="btn btn-reject" data-act="hide-reported" data-id="${id}" title="Hide this listing"><i class="fas fa-eye-slash"></i> Hide listing</button>`}
+                <button class="btn btn-edit" data-act="dismiss-reports" data-id="${id}" title="Nothing is wrong"><i class="fas fa-check"></i> Dismiss reports</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+async function dismissReports(id) {
+    const group = ex.reports.find(r => Number(r.listing_id) === Number(id));
+    const c = await Swal.fire({
+        title: 'Dismiss these reports?',
+        text: `${group ? group.title : 'This listing'} stays visible. The reporters are told that no violation was found.`,
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonText: 'Yes, dismiss'
+    });
+    if (!c.isConfirmed) return;
+
+    try {
+        const r = await adminPost(`/listings/${Number(id)}/dismiss-reports`, {});
+        if (!r) return;
+        if (r.ok) {
+            Swal.fire('Dismissed', 'The reports were closed and the reporters were notified.', 'success');
+            loadReports();
+            loadStats();
+        } else {
+            Swal.fire('Error', r.data.message || 'Failed to dismiss the reports.', 'error');
         }
     } catch (err) {
         Swal.fire('Error', 'Server connection failed.', 'error');
@@ -1132,13 +1268,14 @@ async function loadActivity() {
     fetchActivity(false);
 }
 
-// ===================== 8. LIVE UPDATES (replaces the old 60-second refresh) =====================
+// ===================== 8. LIVE UPDATES =====================
 // Every 20 seconds, while the tab is visible, the panel asks the server for the
 // dashboard numbers. If anything changed (a new landlord request, a landlord
-// appeal, a new user or listing), it shows a toast and refreshes the tables, so
-// nobody has to reload the page. Every third check (about once a minute) it
-// also refreshes the Users and Listings tables, to catch changes by other admins.
-// These background checks are not user activity, so the idle timeout still works.
+// appeal, a new user report, a new user or listing), it shows a toast and
+// refreshes the tables, so nobody has to reload the page. Every third check
+// (about once a minute) it also refreshes the Users and Listings tables, to
+// catch changes made by other admins. These background checks are not user
+// activity, so the idle timeout still works.
 const LIVE_ADMIN_MS = 20000;
 let _refreshTimer;
 let livePrev = null;   // the numbers from the previous check (null = take a baseline)
@@ -1154,6 +1291,7 @@ async function adminLiveTick() {
         const cur = {
             req: Number(s.pendingRequests) || 0,
             app: Number(s.pendingAppeals) || 0,
+            rep: Number(s.openReports) || 0,
             users: Number(s.totalUsers) || 0,
             listings: Number(s.totalListings) || 0
         };
@@ -1165,7 +1303,9 @@ async function adminLiveTick() {
 
         const changed = JSON.stringify(prev) !== JSON.stringify(cur);
         if (changed) {
-            if (cur.app > prev.app) {
+            if (cur.rep > prev.rep) {
+                AdminToast.fire({ icon: 'info', title: 'A listing was reported by a user.', timer: 6000 });
+            } else if (cur.app > prev.app) {
                 AdminToast.fire({ icon: 'info', title: 'A landlord sent an appeal for a hidden listing.', timer: 6000 });
             } else if (cur.req > prev.req) {
                 AdminToast.fire({ icon: 'info', title: 'A new landlord request is waiting.', timer: 6000 });
@@ -1175,6 +1315,7 @@ async function adminLiveTick() {
         if (changed || liveTickCount % 3 === 0) {
             loadStats();
             loadLandlordRequests();
+            loadReports();
             fetchListings();
             fetchUsers();
         }
@@ -1257,7 +1398,7 @@ function startSessionWatch() {
 function stopSessionWatch() {
     clearInterval(sessionTick);
     sessionTick = null;
-    clearInterval(_refreshTimer); // NEW: stop the live updates too
+    clearInterval(_refreshTimer); // stop the live updates too
     livePrev = null;
     idleWarningOpen = false;
     expiryWarned = false;
@@ -1267,6 +1408,11 @@ function stopSessionWatch() {
     ex.users = []; ex.usersById = new Map();
     ex.listings = []; ex.listingsById = new Map();
     ex.requests = new Map(); ex.adminsById = new Map();
+    ex.reports = [];
+    const repBody = $('reportsTableBody');
+    if (repBody) repBody.innerHTML = '';
+    const repBadge = $('repBadge');
+    if (repBadge) repBadge.style.display = 'none';
 
     // And reset the Activity Log (rows + filters + any request still in flight).
     act.rows = []; act.hasMore = false; act.loading = false; act.seq++;
@@ -1363,6 +1509,7 @@ showDashboard = function () {
     renderAdminIdentity();      // instant, from the cached login info
     refreshAdminIdentity();     // then confirm with the server
     loadActivity();
+    loadReports();              // NEW
     startAutoRefresh();
     startSessionWatch();
 };

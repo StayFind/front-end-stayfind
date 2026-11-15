@@ -1,7 +1,8 @@
 // status-notice.js — load AFTER home.js.
 // Replaces checkLandlordStatusUpdate() from home.js (later function
 // declarations win), so home.js stays untouched. Uses home.js globals:
-// currentUser, API_BASE, escapeHtml, buildListingsQuery, loadListings.
+// currentUser, isGuest, API_BASE, escapeHtml, buildListingsQuery, loadListings,
+// allListingsCache, currentDisplayedItems, promptLogin.
 
 (function injectStatusNoticeStyles() {
     if (document.getElementById('statusNoticeStyles')) return;
@@ -121,7 +122,7 @@ function showRejectedNotice(reason) {
     });
 }
 
-// UPDATED: after the landlord clicks OK the page reloads, so the Post button and
+// After the landlord clicks OK the page reloads, so the Post button and
 // the landlord view are fully ready.
 function showApprovedNotice() {
     return Swal.fire({
@@ -425,10 +426,12 @@ async function requestListingReview(item) {
     }
 }
 
+// The details-modal wrapper now also adds the Report button (see further below).
 const _showFullDetailsHiddenOriginal = showFullDetails;
 showFullDetails = function (item) {
     _showFullDetailsHiddenOriginal(item);
     renderHiddenNotice(item);
+    renderReportButton(item);
 };
 
 // ===================== LANDLORD: DELETE COMMENTS ON THEIR LISTING =====================
@@ -534,13 +537,406 @@ async function deleteCommentAsLandlord(rev, listingId) {
     }
 }
 
-// ===================== NEW: LIVE UPDATES (no reload needed) =====================
+// ===================== NEW: REPORT A LISTING =====================
+// A "Report this listing" button under the landlord info in the details modal.
+// Guests are asked to log in; the owner never sees it. Reports never hide a
+// listing by themselves - an admin reviews them.
+const REPORT_REASONS = [
+    ['fake', 'Fake or misleading listing'],
+    ['wrong_info', 'Wrong price or details'],
+    ['scam', 'Suspected scam'],
+    ['inappropriate', 'Inappropriate content'],
+    ['unavailable', 'Already rented / no longer available'],
+    ['other', 'Something else']
+];
+
+(function injectReportStyles() {
+    if (document.getElementById('reportStyles')) return;
+    const style = document.createElement('style');
+    style.id = 'reportStyles';
+    style.textContent = `
+        .report-listing-btn {
+            width: 100%; margin-top: 10px; padding: 9px; border: 1.5px solid #f3c4c6; border-radius: 10px;
+            background: #fff; color: #c0392f; font-size: 12px; font-weight: 700; cursor: pointer;
+            display: flex; align-items: center; justify-content: center; gap: 7px;
+        }
+        .report-listing-btn:hover { background: #fff5f5; }
+        .report-options { display: flex; flex-direction: column; gap: 8px; text-align: left; }
+        .report-option {
+            display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+            border: 1.5px solid #e8edf3; border-radius: 12px; cursor: pointer;
+            font-size: 13px; font-weight: 600; color: #1a2332; margin: 0;
+        }
+        .report-option input { margin: 0; accent-color: #e5484d; }
+        .report-option:has(input:checked) { border-color: #e5484d; background: #fff5f5; }
+        .report-details {
+            width: 100%; min-height: 80px; margin: 12px 0 0; padding: 10px 12px; box-sizing: border-box;
+            border: 1.5px solid #e8edf3; border-radius: 12px; font: inherit; font-size: 13px; resize: vertical;
+        }
+    `;
+    document.head.appendChild(style);
+})();
+
+function renderReportButton(item) {
+    const old = document.getElementById('reportListingBtn');
+    if (old) old.remove();
+
+    const box = document.querySelector('#detailsModal .landlord-info-box');
+    if (!box || !item || !item.user_id) return;
+    if (currentUser && String(currentUser.id) === String(item.user_id)) return; // not on your own listing
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'reportListingBtn';
+    btn.className = 'report-listing-btn';
+    btn.innerHTML = '<i class="fas fa-flag"></i> Report this listing';
+    btn.onclick = () => {
+        if (isGuest) { promptLogin('Log in to report a listing.'); return; }
+        reportListing(item);
+    };
+    box.appendChild(btn);
+}
+
+async function reportListing(item) {
+    const { value, isConfirmed } = await Swal.fire({
+        title: 'Report this listing',
+        html: `
+            <div class="report-options">
+                ${REPORT_REASONS.map(([key, label]) => `
+                    <label class="report-option"><input type="radio" name="reportReason" value="${key}"><span>${label}</span></label>
+                `).join('')}
+            </div>
+            <textarea id="reportDetails" class="report-details" maxlength="500" placeholder="Add details (optional - required for “Something else”)"></textarea>
+        `,
+        showCancelButton: true,
+        confirmButtonText: 'Send report',
+        confirmButtonColor: '#e5484d',
+        focusConfirm: false,
+        preConfirm: () => {
+            const checked = document.querySelector('input[name="reportReason"]:checked');
+            if (!checked) { Swal.showValidationMessage('Please choose a reason.'); return false; }
+            const details = document.getElementById('reportDetails').value.trim();
+            if (checked.value === 'other' && details.length < 5) {
+                Swal.showValidationMessage('Please describe the problem.');
+                return false;
+            }
+            return { reason: checked.value, details };
+        }
+    });
+    if (!isConfirmed) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/listings/${item.id}/report`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(value)
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.success) {
+            Swal.fire({ toast: true, position: 'top-end', icon: 'success', title: 'Report sent. Thank you!', showConfirmButton: false, timer: 3000 });
+        } else if (res.status === 409) {
+            Swal.fire({ toast: true, position: 'top-end', icon: 'info', title: data.message || 'Already reported.', showConfirmButton: false, timer: 3000 });
+        } else {
+            Swal.fire('Could not send the report', data.message || 'Please try again.', 'error');
+        }
+    } catch (err) {
+        Swal.fire('Error', 'Could not connect to the server.', 'error');
+    }
+}
+
+// ===================== NEW: NOTIFICATION BELL =====================
+// A bell in the top-right pill (logged-in users only). It shows an unread badge,
+// opens a panel with the latest notifications, and checks the server every ~15
+// seconds (see liveTick below).
+const NOTIF_ICONS = {
+    landlord_approved: ['fa-circle-check', 'good'],
+    landlord_rejected: ['fa-file-circle-xmark', 'bad'],
+    listing_hidden: ['fa-eye-slash', 'bad'],
+    listing_unhidden: ['fa-eye', 'good'],
+    appeal_declined: ['fa-ban', 'bad'],
+    new_review: ['fa-star', 'info'],
+    review_reply: ['fa-reply', 'info'],
+    report_update: ['fa-flag', 'info'],
+    account_reinstated: ['fa-user-check', 'good']
+};
+
+(function injectNotificationStyles() {
+    if (document.getElementById('notifStyles')) return;
+    const style = document.createElement('style');
+    style.id = 'notifStyles';
+    style.textContent = `
+        .notif-bell {
+            position: relative; width: 38px; height: 38px; border-radius: 50%; flex-shrink: 0;
+            border: none; background: transparent; color: var(--primary); font-size: 16px; cursor: pointer;
+            display: inline-flex; align-items: center; justify-content: center; transition: background 0.15s;
+        }
+        .notif-bell:hover { background: #eef4fd; }
+        .notif-badge {
+            position: absolute; top: 1px; right: 0; min-width: 17px; height: 17px; padding: 0 4px;
+            border-radius: 999px; background: var(--danger); color: #fff; font-size: 10px; font-weight: 800;
+            display: flex; align-items: center; justify-content: center; line-height: 1; border: 2px solid #fff; box-sizing: content-box;
+        }
+        .notif-panel {
+            display: none; position: absolute; top: calc(100% + 10px); right: 0;
+            width: 360px; max-width: calc(100vw - 32px); background: #fff; border-radius: 16px; overflow: hidden;
+            border: 1px solid var(--border); box-shadow: var(--shadow-lg); animation: floatIn 0.15s ease;
+        }
+        .notif-panel.open { display: block; }
+        .notif-head {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            padding: 13px 16px; border-bottom: 1px solid var(--border); font-size: 14px; color: var(--ink);
+        }
+        .notif-head-actions { display: flex; gap: 12px; }
+        .notif-head-actions button {
+            background: none; border: none; padding: 0; cursor: pointer;
+            font-size: 11.5px; font-weight: 700; color: var(--primary);
+        }
+        .notif-head-actions button:hover { text-decoration: underline; }
+        .notif-list { max-height: min(420px, 60vh); overflow-y: auto; }
+        .notif-item {
+            display: flex; gap: 12px; padding: 12px 16px; cursor: pointer;
+            border-bottom: 1px solid #f1f4f8; transition: background 0.12s;
+        }
+        .notif-item:last-child { border-bottom: none; }
+        .notif-item:hover { background: #f4f8fd; }
+        .notif-item.unread { background: #f1f8ff; }
+        .notif-icon {
+            width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0; font-size: 13px;
+            display: flex; align-items: center; justify-content: center;
+            background: #e3f2fd; color: var(--primary);
+        }
+        .notif-icon.good { background: #e6f7ec; color: var(--success); }
+        .notif-icon.bad { background: #fdeaea; color: #c0392f; }
+        .notif-text { min-width: 0; flex: 1; }
+        .notif-title { font-size: 13px; font-weight: 700; color: var(--ink); line-height: 1.3; }
+        .notif-msg { margin-top: 2px; font-size: 12.5px; color: var(--ink-soft); line-height: 1.45; overflow-wrap: anywhere; }
+        .notif-time { margin-top: 4px; font-size: 11px; color: var(--muted); font-weight: 600; }
+        .notif-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--primary); flex-shrink: 0; margin-top: 6px; }
+        .notif-empty { padding: 34px 16px; text-align: center; color: var(--muted); font-size: 13px; }
+        .notif-empty i { display: block; font-size: 24px; margin-bottom: 8px; color: #cbd5e1; }
+        @media (max-width: 768px) {
+            body:not(.is-guest) .sticky-search-bar { padding-right: 120px !important; }
+        }
+    `;
+    document.head.appendChild(style);
+})();
+
+const notifState = { items: [], unread: 0, topId: null };
+
+function notifTimeAgo(iso) {
+    const t = new Date(iso).getTime();
+    if (isNaN(t)) return '';
+    const s = Math.floor((Date.now() - t) / 1000);
+    if (s < 60) return 'Just now';
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    if (d < 7) return `${d}d ago`;
+    return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function isNotifPanelOpen() {
+    const panel = document.getElementById('notifPanel');
+    return !!panel && panel.classList.contains('open');
+}
+
+function closeNotifPanel() {
+    const panel = document.getElementById('notifPanel');
+    if (panel) panel.classList.remove('open');
+    const bell = document.getElementById('notifBellBtn');
+    if (bell) bell.setAttribute('aria-expanded', 'false');
+}
+
+function renderNotifBadge() {
+    const badge = document.getElementById('notifBadge');
+    if (!badge) return;
+    if (notifState.unread > 0) {
+        badge.textContent = notifState.unread > 99 ? '99+' : String(notifState.unread);
+        badge.style.display = 'flex';
+    } else {
+        badge.style.display = 'none';
+    }
+}
+
+function renderNotifList() {
+    const list = document.getElementById('notifList');
+    if (!list) return;
+
+    if (notifState.items.length === 0) {
+        list.innerHTML = `<div class="notif-empty"><i class="fas fa-bell-slash"></i>You're all caught up.</div>`;
+        return;
+    }
+
+    list.innerHTML = notifState.items.map(n => {
+        const [icon, tone] = NOTIF_ICONS[n.type] || ['fa-bell', 'info'];
+        const unread = !Number(n.is_read);
+        return `
+            <div class="notif-item${unread ? ' unread' : ''}" data-id="${Number(n.id)}" data-listing="${n.listing_id ? Number(n.listing_id) : ''}">
+                <div class="notif-icon ${tone}"><i class="fas ${icon}"></i></div>
+                <div class="notif-text">
+                    <div class="notif-title">${escapeHtml(n.title)}</div>
+                    <div class="notif-msg">${escapeHtml(n.message)}</div>
+                    <div class="notif-time">${escapeHtml(notifTimeAgo(n.created_at))}</div>
+                </div>
+                ${unread ? '<span class="notif-dot"></span>' : ''}
+            </div>`;
+    }).join('');
+}
+
+async function pollNotifications() {
+    if (!currentUser) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/notifications`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const items = Array.isArray(data.notifications) ? data.notifications : [];
+        const topId = items.length ? Number(items[0].id) : 0;
+
+        // A toast for anything new since the last check (not on the very first check).
+        if (notifState.topId !== null && topId > notifState.topId && !isNotifPanelOpen() && !Swal.isVisible()) {
+            const fresh = items.filter(n => Number(n.id) > notifState.topId && !Number(n.is_read));
+            if (fresh.length > 0) {
+                Swal.fire({
+                    toast: true, position: 'top', icon: 'info', showConfirmButton: false, timer: 4500,
+                    title: fresh.length === 1 ? fresh[0].title : `${fresh.length} new notifications`
+                });
+            }
+        }
+
+        notifState.topId = topId;
+        notifState.items = items;
+        notifState.unread = Number(data.unread) || 0;
+        renderNotifBadge();
+        if (isNotifPanelOpen()) renderNotifList();
+    } catch (err) {
+        console.log('Notification check failed silently:', err);
+    }
+}
+
+// Opens the details modal of a listing from a notification.
+async function openListingFromNotification(listingId) {
+    const find = (rows) => rows.find(i => String(i.id) === String(listingId));
+    let item = find(allListingsCache) || find(currentDisplayedItems);
+
+    if (!item) {
+        try {
+            const res = await fetch(buildListingsQuery('all=true'));
+            const data = await res.json();
+            item = find(Array.isArray(data.listings) ? data.listings : []);
+        } catch (err) { /* handled below */ }
+    }
+
+    if (item) {
+        showFullDetails(item);
+    } else {
+        Swal.fire({ toast: true, position: 'top', icon: 'info', title: 'That listing is no longer available.', showConfirmButton: false, timer: 3000 });
+    }
+}
+
+function setupNotificationBell() {
+    if (!currentUser) return;
+    const box = document.getElementById('topActions');
+    if (!box || document.getElementById('notifBellBtn')) return;
+
+    const bell = document.createElement('button');
+    bell.type = 'button';
+    bell.id = 'notifBellBtn';
+    bell.className = 'notif-bell';
+    bell.setAttribute('aria-label', 'Notifications');
+    bell.setAttribute('aria-haspopup', 'true');
+    bell.setAttribute('aria-expanded', 'false');
+    bell.innerHTML = '<i class="fas fa-bell"></i><span id="notifBadge" class="notif-badge" style="display:none;">0</span>';
+
+    const panel = document.createElement('div');
+    panel.id = 'notifPanel';
+    panel.className = 'notif-panel';
+    panel.innerHTML = `
+        <div class="notif-head">
+            <strong>Notifications</strong>
+            <div class="notif-head-actions">
+                <button type="button" id="notifReadAll">Mark all read</button>
+                <button type="button" id="notifClear">Clear</button>
+            </div>
+        </div>
+        <div id="notifList" class="notif-list"></div>`;
+
+    box.insertBefore(bell, box.firstChild);
+    box.appendChild(panel);
+
+    bell.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const open = !panel.classList.contains('open');
+        const userMenu = document.getElementById('userMenu');
+        if (userMenu) userMenu.classList.remove('open');
+        panel.classList.toggle('open', open);
+        bell.setAttribute('aria-expanded', String(open));
+        if (open) { renderNotifList(); pollNotifications(); }
+    });
+
+    // Opening the account menu closes the bell panel.
+    const chip = document.getElementById('userChipBtn');
+    if (chip) chip.addEventListener('click', closeNotifPanel);
+
+    document.addEventListener('click', (e) => { if (!box.contains(e.target)) closeNotifPanel(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeNotifPanel(); });
+
+    document.getElementById('notifReadAll').addEventListener('click', async () => {
+        notifState.items.forEach(n => { n.is_read = 1; });
+        notifState.unread = 0;
+        renderNotifBadge();
+        renderNotifList();
+        try { await fetch(`${API_BASE}/notifications/read-all`, { method: 'POST' }); } catch (err) { /* ignore */ }
+    });
+
+    document.getElementById('notifClear').addEventListener('click', async () => {
+        notifState.items = [];
+        notifState.unread = 0;
+        renderNotifBadge();
+        renderNotifList();
+        try { await fetch(`${API_BASE}/notifications`, { method: 'DELETE' }); } catch (err) { /* ignore */ }
+    });
+
+    document.getElementById('notifList').addEventListener('click', async (e) => {
+        const row = e.target.closest('.notif-item');
+        if (!row) return;
+        const id = Number(row.dataset.id);
+        const listingId = row.dataset.listing;
+
+        const n = notifState.items.find(x => Number(x.id) === id);
+        if (n && !Number(n.is_read)) {
+            n.is_read = 1;
+            notifState.unread = Math.max(0, notifState.unread - 1);
+            renderNotifBadge();
+            renderNotifList();
+            try { await fetch(`${API_BASE}/notifications/${id}/read`, { method: 'POST' }); } catch (err) { /* ignore */ }
+        }
+
+        if (listingId) {
+            closeNotifPanel();
+            openListingFromNotification(listingId);
+        }
+    });
+}
+
+// The inline script in home.html fills the top-right pill while the page loads,
+// so the bell is added once the page is ready.
+if (currentUser) {
+    const initBell = () => { setupNotificationBell(); pollNotifications(); };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initBell);
+    else initBell();
+}
+
+// ===================== LIVE UPDATES (no reload needed) =====================
 // Every ~15 seconds, while the tab is visible and the person is logged in:
 //   1. checkLandlordStatusUpdate() asks the server for the fresh profile. This
 //      also catches a SUSPENSION (the server answers 401 and auth-fetch.js shows
 //      the "Account suspended" popup), and landlord approval / rejection.
 //   2. A landlord's own listings are re-checked; if an admin hid, unhid or
 //      answered an appeal, the grid refreshes by itself.
+//   3. NEW: notifications are re-checked for the bell.
 // Nothing refreshes while a popup or modal is open, so no one is interrupted.
 const LIVE_INTERVAL_MS = 15000;
 let liveListingSig = null; // null = "take a fresh baseline on the next check"
@@ -584,6 +980,7 @@ function liveTick() {
     if (!currentUser || document.hidden) return;
     checkLandlordStatusUpdate();
     pollOwnListings();
+    pollNotifications();
 }
 
 if (currentUser) {

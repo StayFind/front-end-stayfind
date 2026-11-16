@@ -1,5 +1,5 @@
 // Initialize EmailJS with your User ID
-emailjs.init("Y7oJ_Er1PJ59eTUfI"); 
+emailjs.init("WFYhvfvajmBC1jCWw"); 
 
 const API_BASE = "https://stayfind-app-system.onrender.com/api";
 
@@ -84,7 +84,7 @@ document.getElementById('signUpForm').addEventListener('submit', async (e) => {
         time: "15 minutes"
     };
 
-    emailjs.send('service_3hidsqf', 'template_cegi0tu', templateParams)
+    emailjs.send('service_th8b7g3', 'template_gdm97v8', templateParams)
         .then(() => {
             btn.disabled = false;
             btn.innerText = "Sign Up";

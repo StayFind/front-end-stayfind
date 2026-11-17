@@ -1,5 +1,5 @@
 // REPLACE THIS with your Render URL
-const API_BASE = "https://stayfind-app-system.onrender.com/api";
+const API_BASE = "https://stayfind-candelaria.onrender.com/api";
 
 // NEW: Cloudinary config for client-side photo uploads (see the big comment
 // above uploadImagesToCloudinary() below for full setup steps). Photos are

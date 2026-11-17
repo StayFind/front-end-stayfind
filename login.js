@@ -1,7 +1,7 @@
 // Initialize EmailJS with your User ID
 emailjs.init("WFYhvfvajmBC1jCWw"); 
 
-const API_BASE = "https://stayfind-app-system.onrender.com/api";
+const API_BASE = "https://stayfind-candelaria.onrender.com/api";
 
 // Clears the session but keeps the landlord notification memory
 function clearSessionKeepNotices() {

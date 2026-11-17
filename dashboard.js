@@ -1,5 +1,5 @@
 // REPLACE THIS with your Render URL
-const API_BASE = "https://stayfind-app-system.onrender.com/api";
+const API_BASE = "https://stayfind-candelaria.onrender.com/api";
 
 // NEW: where "go to the login page" points (see login.js: ?auth=signin)
 const LOGIN_URL = "index.html?auth=signin";

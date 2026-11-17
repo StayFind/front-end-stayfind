@@ -1,5 +1,5 @@
 // REPLACE THIS with your Render URL (same as home.js / login.js)
-const API_BASE = "https://stayfind-app-system.onrender.com/api/admin";
+const API_BASE = "https://stayfind-candelaria.onrender.com/api/admin";
 
 // UPDATED (Module 5): the admin session lives in sessionStorage, so closing the
 // tab or browser signs the admin out. (It used to be localStorage, which kept

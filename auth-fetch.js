@@ -12,7 +12,7 @@
 // - NEW: /api/admin requests are left alone. The admin panel has its own token
 //   handling, and a normal user's token must not interfere with it.
 (function () {
-    const API_PREFIX = "https://stayfind-app-system.onrender.com/api";
+    const API_PREFIX = "https://stayfind-candelaria.onrender.com/api";
     const LOGIN_URL = "index.html?auth=signin";
     const originalFetch = window.fetch.bind(window);
 
